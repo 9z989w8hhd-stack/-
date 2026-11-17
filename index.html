@@ -1,250 +1,203 @@
 
-
 <!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport"
       content="width=device-width, initial-scale=1">
-<title>AI 학습 카메라</title>
+
+<title>AI 학습 문서 스캐너</title>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
 <style>
   body {
-    font-family: sans-serif;
-    text-align: center;
-    background: #f5f5f5;
-    padding: 12px;
     margin: 0;
+    padding: 15px;
+    background: #f3f4f6;
+    font-family: -apple-system, sans-serif;
+    color: #111827;
   }
 
-  video, img {
+  h2, h3 {
+    text-align: center;
+  }
+
+  video {
     width: 100%;
+    background: black;
     border-radius: 12px;
-    background: #111;
   }
 
   button {
-    padding: 14px;
-    margin: 5px;
-    border: none;
-    border-radius: 10px;
+    padding: 13px;
+    margin: 4px;
     background: #2563eb;
     color: white;
+    border: 0;
+    border-radius: 10px;
     font-size: 15px;
   }
 
-  .panel {
-    background: white;
-    border-radius: 12px;
-    padding: 16px;
-    margin: 12px 0;
+  button:disabled {
+    opacity: 0.4;
   }
 
-  .score {
-    font-size: 28px;
+  .panel {
+    margin: 14px 0;
+    padding: 14px;
+    background: white;
+    border-radius: 12px;
+  }
+
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .frame {
+    width: 100%;
+    max-width: 450px;
+    margin: 12px auto;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #ddd;
+  }
+
+  .frame img {
+    width: 100%;
+    border-radius: 8px;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 120px;
+    box-sizing: border-box;
+    padding: 10px;
+    font-size: 15px;
+  }
+
+  #status {
+    text-align: center;
     font-weight: bold;
   }
 
-  #photo {
-    display: none;
+  .note {
+    color: #666;
+    font-size: 13px;
   }
 </style>
 </head>
 
 <body>
 
-<h2>AI 학습 카메라</h2>
+<h2>AI 학습 문서 스캐너</h2>
+
 <p id="status">카메라를 켜주세요.</p>
 
 <video id="camera"
-       autoplay
-       muted
-       playsinline></video>
+       autoplay muted playsinline></video>
 
-<div>
-  <button onclick="startCamera()">카메라 켜기</button>
-  <button onclick="capturePhoto()">문제 촬영</button>
-  <button onclick="stopCamera()">카메라 끄기</button>
+<div class="row">
+  <button id="startCamera">카메라 켜기</button>
+  <button id="stopCamera">카메라 끄기</button>
 </div>
 
 <div class="panel">
-  <h3>실시간 선명도 분석</h3>
+  <h3>다중 프레임 문서 스캔</h3>
 
-  <div id="quality" class="score">
-    대기 중
+  <div class="row">
+    <button id="startScan">스캔 시작</button>
+    <button id="stopScan">스캔 종료</button>
   </div>
 
-  <p>선명도 점수: <span id="score">-</span></p>
-  <p>현재 세션 최고 점수:
-     <span id="best">-</span>
-  </p>
+  <p id="count">수집된 프레임: 0 / 6</p>
 
-  <small>
-    점수는 상대적인 선명도 지표이며
-    글씨 인식 정확도를 보장하지 않습니다.
-  </small>
+  <p class="note">
+    1.5초마다 한 장씩, 최대 6프레임을
+    수집합니다.
+  </p>
 </div>
 
 <div class="panel">
-  <h3>촬영한 사진</h3>
-  <img id="photo" alt="촬영 이미지">
+  <h3>OCR 글씨 인식</h3>
+
+  <button id="runOCR">수집한 이미지 글씨 인식</button>
+
+  <p id="ocrStatus">인식 대기 중</p>
+
+  <div id="results"></div>
+</div>
+
+<div class="panel">
+  <h3>텍스트 검토</h3>
+
+  <p class="note">
+    프레임별 인식 내용을 확인하고
+    누락된 부분을 직접 수정하세요.
+  </p>
+
+  <textarea id="finalText"
+    placeholder="검토한 텍스트를 여기에 정리하세요."></textarea>
+
+  <button id="copyText">텍스트 복사</button>
+  <button id="clearAll">전체 초기화</button>
 </div>
 
 <canvas id="canvas" style="display:none"></canvas>
-<canvas id="analysis" style="display:none"></canvas>
 
 <script>
-let stream = null;
-let timer = null;
-let bestScore = 0;
-
 const video = document.getElementById("camera");
-const photo = document.getElementById("photo");
 const canvas = document.getElementById("canvas");
-const analysis = document.getElementById("analysis");
+
 const statusText = document.getElementById("status");
+const countText = document.getElementById("count");
+const ocrStatus = document.getElementById("ocrStatus");
+const results = document.getElementById("results");
+
+const finalText = document.getElementById("finalText");
+
+let stream = null;
+let scanTimer = null;
+let frames = [];
+let scanning = false;
+let processing = false;
+
+const MAX_FRAMES = 6;
+
+function updateCount() {
+  countText.textContent =
+    "수집된 프레임: " +
+    frames.length + " / " + MAX_FRAMES;
+}
 
 async function startCamera() {
   stopCamera();
-  bestScore = 0;
 
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: "environment",
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      }
-    });
+    stream = await navigator.mediaDevices
+      .getUserMedia({
+        audio: false,
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
 
     video.srcObject = stream;
     await video.play();
 
     statusText.textContent = "카메라 작동 중";
 
-    timer = setInterval(checkSharpness, 700);
-
-  } catch (error) {
+  } catch (err) {
     statusText.textContent =
-      "카메라 오류: " + error.message;
+      "카메라 오류: " + err.message;
   }
-}
-
-function checkSharpness() {
-  if (!stream || !video.videoWidth) return;
-
-  // 처리량을 줄이기 위한 축소 영상
-  const w = 240;
-  const h = 180;
-
-  analysis.width = w;
-  analysis.height = h;
-
-  const ctx = analysis.getContext(
-    "2d",
-    { willReadFrequently: true }
-  );
-
-  ctx.drawImage(video, 0, 0, w, h);
-
-  const data = ctx.getImageData(0, 0, w, h).data;
-  const gray = new Float32Array(w * h);
-
-  for (let i = 0; i < gray.length; i++) {
-    const p = i * 4;
-
-    gray[i] =
-      data[p] * 0.299 +
-      data[p + 1] * 0.587 +
-      data[p + 2] * 0.114;
-  }
-
-  // 라플라시안 분산으로 선명도 추정
-  let sum = 0;
-  let sumSq = 0;
-  let count = 0;
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-
-      const lap =
-        4 * gray[i] -
-        gray[i - 1] -
-        gray[i + 1] -
-        gray[i - w] -
-        gray[i + w];
-
-      sum += lap;
-      sumSq += lap * lap;
-      count++;
-    }
-  }
-
-  const mean = sum / count;
-  const score = Math.max(
-    0,
-    sumSq / count - mean * mean
-  );
-
-  if (score > bestScore) {
-    bestScore = score;
-  }
-
-  const ratio = bestScore > 0
-    ? score / bestScore
-    : 0;
-
-  let label = "상대적으로 흐림";
-
-  if (score < 1) {
-    label = "질감 부족 / 측정 어려움";
-  } else if (ratio >= 0.8) {
-    label = "상대적으로 선명";
-  } else if (ratio >= 0.5) {
-    label = "선명도 보통";
-  }
-
-  document.getElementById("score").textContent =
-    score.toFixed(1);
-
-  document.getElementById("best").textContent =
-    bestScore.toFixed(1);
-
-  document.getElementById("quality").textContent =
-    label;
-}
-
-function capturePhoto() {
-  if (!stream || !video.videoWidth) {
-    alert("먼저 카메라를 켜주세요.");
-    return;
-  }
-
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(
-    video,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  photo.src = canvas.toDataURL("image/jpeg", 0.95);
-  photo.style.display = "block";
-
-  statusText.textContent = "촬영 완료";
 }
 
 function stopCamera() {
-  if (timer !== null) {
-    clearInterval(timer);
-    timer = null;
-  }
+  stopScan();
 
   if (stream) {
     stream.getTracks().forEach(
@@ -257,6 +210,216 @@ function stopCamera() {
   statusText.textContent = "카메라 꺼짐";
 }
 
+function captureFrame() {
+  if (!stream || !video.videoWidth) return;
+
+  if (frames.length >= MAX_FRAMES) {
+    stopScan();
+    return;
+  }
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  const ctx = canvas.getContext("2d");
+
+  ctx.drawImage(
+    video, 0, 0,
+    canvas.width, canvas.height
+  );
+
+  const image = canvas.toDataURL("image/jpeg", 0.9);
+
+  frames.push(image);
+  updateCount();
+
+  if (frames.length >= MAX_FRAMES) {
+    stopScan();
+  }
+}
+
+function startScan() {
+  if (!stream) {
+    alert("카메라를 먼저 켜주세요.");
+    return;
+  }
+
+  if (processing) return;
+
+  stopScan();
+  frames = [];
+  updateCount();
+
+  results.innerHTML = "";
+  ocrStatus.textContent = "이미지 수집 중";
+
+  scanning = true;
+
+  captureFrame();
+
+  scanTimer = setInterval(() => {
+    if (scanning) captureFrame();
+  }, 1500);
+}
+
+function stopScan() {
+  scanning = false;
+
+  if (scanTimer !== null) {
+    clearInterval(scanTimer);
+    scanTimer = null;
+  }
+
+  if (frames.length > 0 && !processing) {
+    ocrStatus.textContent =
+      frames.length + "개 프레임 수집 완료";
+  }
+}
+
+async function runOCR() {
+  if (processing) return;
+
+  stopScan();
+
+  if (frames.length === 0) {
+    alert("먼저 문서를 스캔해주세요.");
+    return;
+  }
+
+  if (typeof Tesseract === "undefined") {
+    ocrStatus.textContent =
+      "OCR 라이브러리를 불러오지 못했습니다.";
+    return;
+  }
+
+  processing = true;
+
+  document.getElementById("runOCR")
+    .disabled = true;
+
+  results.innerHTML = "";
+  ocrStatus.textContent =
+    "한국어·영어 인식 모델 준비 중";
+
+  let worker = null;
+
+  try {
+    worker = await Tesseract.createWorker(
+      "kor+eng",
+      1
+    );
+
+    const texts = [];
+
+    for (let i = 0; i < frames.length; i++) {
+      ocrStatus.textContent =
+        (i + 1) + " / " +
+        frames.length + " 프레임 인식 중";
+
+      const result = await worker.recognize(
+        frames[i]
+      );
+
+      const text = result.data.text.trim();
+
+      texts.push(text);
+
+      const box = document.createElement("div");
+      box.className = "frame";
+
+      const heading = document.createElement("h4");
+      heading.textContent =
+        "프레임 " + (i + 1);
+
+      const image = document.createElement("img");
+      image.src = frames[i];
+
+      const area = document.createElement("textarea");
+      area.value = text || "(인식된 글자 없음)";
+
+      box.appendChild(heading);
+      box.appendChild(image);
+      box.appendChild(area);
+
+      results.appendChild(box);
+    }
+
+    // 각 프레임의 텍스트를 따로 보존
+    // 잘못된 문장 결합을 피하기 위한 처리
+    finalText.value = texts.map(
+      (text, i) =>
+        "[프레임 " + (i + 1) + "]\n" +
+        text
+    ).join("\n\n----------\n\n");
+
+    ocrStatus.textContent =
+      "OCR 완료 - 텍스트를 검토하세요.";
+
+  } catch (err) {
+    ocrStatus.textContent =
+      "OCR 오류: " + err.message;
+
+  } finally {
+    if (worker) {
+      await worker.terminate();
+    }
+
+    processing = false;
+
+    document.getElementById("runOCR")
+      .disabled = false;
+  }
+}
+
+function clearAll() {
+  if (processing) return;
+
+  stopScan();
+
+  frames = [];
+  results.innerHTML = "";
+  finalText.value = "";
+
+  updateCount();
+
+  ocrStatus.textContent = "인식 대기 중";
+}
+
+async function copyText() {
+  try {
+    await navigator.clipboard.writeText(
+      finalText.value
+    );
+
+    alert("텍스트를 복사했습니다.");
+
+  } catch (err) {
+    finalText.select();
+    alert("텍스트를 선택했습니다. 복사해주세요.");
+  }
+}
+
+document.getElementById("startCamera")
+  .onclick = startCamera;
+
+document.getElementById("stopCamera")
+  .onclick = stopCamera;
+
+document.getElementById("startScan")
+  .onclick = startScan;
+
+document.getElementById("stopScan")
+  .onclick = stopScan;
+
+document.getElementById("runOCR")
+  .onclick = runOCR;
+
+document.getElementById("clearAll")
+  .onclick = clearAll;
+
+document.getElementById("copyText")
+  .onclick = copyText;
 </script>
+
 </body>
 </html>
